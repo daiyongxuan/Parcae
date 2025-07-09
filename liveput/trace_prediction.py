@@ -1,5 +1,5 @@
 import numpy as np
-from statsmodels.tsa.arima_model import ARIMA
+from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 warnings.filterwarnings('ignore', 'statsmodels.tsa.arima_model.ARMA', FutureWarning)
@@ -57,8 +57,12 @@ class TracePrediction:
                               order=(self.predict_config['p'],
                                      self.predict_config['d'],
                                      self.predict_config['q']))
-                model_fit = model.fit(disp=5 if verbose else -1)
-                estimated_trace = np.rint(model_fit.forecast(self.num_future_intervals)[0])
+                try:
+                    model_fit = model.fit()
+                    estimated_trace = np.rint(model_fit.forecast(self.num_future_intervals))
+                except:
+                    # Fallback to baseline method if ARIMA fails
+                    estimated_trace = [round(past_history[-1]) for _ in range(self.num_future_intervals)]
             in_prediction = np.zeros(self.num_future_intervals)
             out_prediction = np.zeros(self.num_future_intervals)
             # control range of change per prediction

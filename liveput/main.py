@@ -53,15 +53,30 @@ def setup_env(model, restart_cost, nnodes=32, ngpu_per_node=1):
 
 
 def run_monte_carlo(args):
-    N, D, P, n_in, n_out, update_cache = args
+    N, D, P, n_in, n_out, update_cache, model_name, train_batch_size, restart_cost, n_sim = args
+    
+    # Re-initialize environment in each subprocess
+    from model import ModelSpec, gen_model_signature
+    from monte_carlo import LiveStore
+    from cost import CostModel, setup_costmodel
+    
+    model = ModelSpec.build(model=model_name, train_batch_size=train_batch_size, nparts=0)
+    
+    # Setup cost model
+    model_signature = gen_model_signature(model, 32, 1)  # Using default values
+    costmodel = CostModel(model=model.name, model_signature=model_signature, restart_cost=restart_cost)
+    setup_costmodel(costmodel)
+    
+    store = LiveStore('livestore', model, restart_cost=restart_cost, n_sim=n_sim, update_cache=update_cache)
+    
     key = (N, D, P, n_in, n_out)
-    if update_cache or get_store().get(key) is None:
-        get_store().simulate(N, D, P, n_in, n_out)
-    values = get_store().get(key)
+    if update_cache or store.get(key) is None:
+        store.simulate(N, D, P, n_in, n_out)
+    values = store.get(key)
     return key, values
 
 
-def monte_carlo_simulation(model, tracefile, start_hour, end_hour, interval_length, mc_sample_look_aheads, n_sim=1000, update_cache=False):
+def monte_carlo_simulation(model, tracefile, start_hour, end_hour, interval_length, mc_sample_look_aheads, n_sim=1000, update_cache=False, restart_cost=None):
     trace_pairs = []
 
     trace = SpotTrace(tracefile, start_hour, end_hour, interval_length=interval_length, num_future_intervals=mc_sample_look_aheads[0])
@@ -106,29 +121,31 @@ def monte_carlo_simulation(model, tracefile, start_hour, end_hour, interval_leng
     args = []
     for N, n_in, n_out in trace_pairs:
         for D, P in gen_strategy_pairs(N):
-            args.append((N, D, P, n_in, n_out, update_cache))
+            args.append((N, D, P, n_in, n_out, update_cache, model.name, model.train_batch_size, restart_cost, n_sim))
 
     print(f'Begin to run monte carlo simulation, totoal tasks: {len(args)}, cpu count: {multiprocessing.cpu_count()}')
     with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
         progress = 0
         st = time.time()
+        # Collect all results
+        all_results = []
         for result in pool.imap_unordered(run_monte_carlo, args):
             key, value = result[0], result[1]
-            try:
-                get_store().update(key, value)
-            except:
-                print(key, value)
+            all_results.append((key, value))
 
             progress += 1
             if progress % 1000 == 0:
                 duration = time.time() - st
-                print(f'> Saving store..., average speed: {progress / duration:.2f} tasks/s')
-                get_store().save()
-                duration = time.time() - st
                 print(f'> Finish {progress}/{len(args)}, monte-carlo takes total {duration:.3f} seconds...')
 
+    # Update the main store with all results
+    from monte_carlo import LiveStore
+    main_store = LiveStore('livestore', model, restart_cost=restart_cost, n_sim=n_sim, update_cache=update_cache)
+    for key, value in all_results:
+        main_store.update(key, value)
+    
     # save simulation result
-    get_store().save()
+    main_store.save()
 
 
 def run_throughput_optimized(model, trace, ideal=False):
@@ -263,7 +280,7 @@ def main():
     setup_env(model, args.restart_cost)
 
     if args.mc_sample:
-        monte_carlo_simulation(model, args.trace, args.start_hour, args.end_hour, 60, args.mc_sample_look_aheads, args.n_sim, args.update_cache)
+        monte_carlo_simulation(model, args.trace, args.start_hour, args.end_hour, 60, args.mc_sample_look_aheads, args.n_sim, args.update_cache, args.restart_cost)
         return
 
     run_liveput_optimization(args.trace, args.start_hour, args.end_hour, model, args.look_ahead, args.restart_cost, args.disable_pred, update_cache=args.update_cache)
